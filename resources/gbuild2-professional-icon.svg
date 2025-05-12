@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Definitions for gradients and effects -->
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4285F4;stop-opacity:1" /> <!-- Google Blue -->
+      <stop offset="100%" style="stop-color:#0F9D58;stop-opacity:1" /> <!-- Google Green -->
+    </linearGradient>
+    
+    <linearGradient id="leafGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#34A853;stop-opacity:1" /> <!-- Brighter green -->
+      <stop offset="100%" style="stop-color:#0F9D58;stop-opacity:1" /> <!-- Google Green -->
+    </linearGradient>
+    
+    <linearGradient id="stemGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0F9D58;stop-opacity:1" /> <!-- Google Green -->
+      <stop offset="100%" style="stop-color:#137333;stop-opacity:1" /> <!-- Darker green -->
+    </linearGradient>
+    
+    <filter id="dropShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8"/>
+      <feOffset dx="0" dy="4" result="offsetblur"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.2"/>
+      </feComponentTransfer>
+      <feMerge> 
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/> 
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Background square - full bleed as required by Google Play -->
+  <rect width="1024" height="1024" fill="url(#bgGradient)"/>
+  
+  <!-- Main circular container with material design elevation -->
+  <circle cx="512" cy="512" r="400" fill="white" filter="url(#dropShadow)"/>
+  
+  <!-- Stylized "G" for GBuild -->
+  <path d="M512 240
+           A 220 220 0 0 1 732 460
+           L 732 562
+           L 632 562
+           L 632 460
+           A 120 120 0 1 0 512 580
+           L 512 680
+           A 220 220 0 0 1 292 460
+           A 220 220 0 0 1 512 240
+           Z" 
+        fill="#4285F4" /> <!-- Google Blue -->
+  
+  <!-- Wheat/Plant symbol representing agricultural modeling -->
+  <g transform="translate(512, 520) scale(0.6)">
+    <!-- Main stem -->
+    <path d="M0 0 L0 200" stroke="url(#stemGradient)" stroke-width="25" stroke-linecap="round" />
+    
+    <!-- Lower leaves -->
+    <path d="M0 160 C-80 90, -140 160, -180 140" stroke="url(#leafGradient)" stroke-width="20" stroke-linecap="round" fill="none" />
+    <path d="M0 160 C80 90, 140 160, 180 140" stroke="url(#leafGradient)" stroke-width="20" stroke-linecap="round" fill="none" />
+    
+    <!-- Middle leaves -->
+    <path d="M0 100 C-70 40, -120 100, -150 80" stroke="url(#leafGradient)" stroke-width="17" stroke-linecap="round" fill="none" />
+    <path d="M0 100 C70 40, 120 100, 150 80" stroke="url(#leafGradient)" stroke-width="17" stroke-linecap="round" fill="none" />
+    
+    <!-- Upper leaves -->
+    <path d="M0 40 C-60 -10, -100 40, -120 20" stroke="url(#leafGradient)" stroke-width="14" stroke-linecap="round" fill="none" />
+    <path d="M0 40 C60 -10, 100 40, 120 20" stroke="url(#leafGradient)" stroke-width="14" stroke-linecap="round" fill="none" />
+  </g>
+  
+  <!-- Number 2 with Google Material Design style -->
+  <path d="M680 620
+           Q 680 600 660 600
+           L 600 600
+           Q 580 600 580 620
+           L 580 640
+           Q 580 660 600 660
+           L 640 660
+           L 580 720
+           L 580 760
+           L 680 760
+           L 680 720
+           L 620 720
+           L 680 660
+           Z"
+        fill="#EA4335" /> <!-- Google Red -->
+  
+  <!-- Data visualization element - subtle line graph in bottom -->
+  <polyline points="250,720 300,680 350,700 400,670 450,690 500,650 550,680 600,650 650,670"
+           stroke="#FBBC05" <!-- Google Yellow -->
+           stroke-width="8"
+           fill="none"
+           stroke-linejoin="round"
+           stroke-linecap="round" />
+</svg>
