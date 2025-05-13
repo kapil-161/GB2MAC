@@ -1,0 +1,622 @@
+import os
+import subprocess
+import logging
+import platform
+import shutil
+from typing import List, Union, Dict, Optional
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("dssat_runner")
+
+class DSSATRunner:
+    """Simple class to run DSSAT with multiple experiments on macOS."""
+    
+    def __init__(self, dssat_path: str):
+        """
+        Initialize with DSSAT installation path.
+        
+        Args:
+            dssat_path: Path to DSSAT installation folder
+        """
+        self.dssat_path = dssat_path
+        self.validate_dssat_path()
+        
+    def validate_dssat_path(self):
+        """Check if DSSAT path exists and has expected structure for Mac."""
+        if not os.path.exists(self.dssat_path):
+            raise FileNotFoundError(f"DSSAT path not found: {self.dssat_path}")
+        
+        # On Mac, the executable doesn't have .EXE extension
+        # Look for DSCSM048 or dscsm048 or similar
+        executables = []
+        for f in os.listdir(self.dssat_path):
+            if (f.upper().startswith("DSCSM") or f.lower().startswith("dscsm")) and os.access(os.path.join(self.dssat_path, f), os.X_OK):
+                executables.append(f)
+        
+        if not executables:
+            # Check one more level down in common Mac installation structures
+            for dir_name in os.listdir(self.dssat_path):
+                bin_dir = os.path.join(self.dssat_path, dir_name, "bin")
+                if os.path.isdir(bin_dir):
+                    for f in os.listdir(bin_dir):
+                        if (f.upper().startswith("DSCSM") or f.lower().startswith("dscsm")) and os.access(os.path.join(bin_dir, f), os.X_OK):
+                            executables.append(f)
+                            self.dssat_path = bin_dir  # Update path to include bin directory
+        
+        if not executables:
+            raise FileNotFoundError(f"No DSSAT executable found in {self.dssat_path}")
+        
+        self.executable = executables[0]
+        logger.info(f"Found DSSAT executable: {self.executable} in {self.dssat_path}")
+    
+    def create_batch_file(self, 
+                     crop_folder: str, 
+                     experiment_files: Union[str, List[str]], 
+                     treatments: Union[int, List[int]]) -> str:
+        """
+        Create a DSSAT batch file for single or multiple experiments.
+        
+        Args:
+            crop_folder: Name of the crop folder (e.g., 'Maize')
+            experiment_files: Single experiment file or list of experiment files
+            treatments: Treatment number(s) to run
+            
+        Returns:
+            Path to the created batch file
+        """
+        # Normalize inputs
+        if isinstance(experiment_files, str):
+            experiment_files = [experiment_files]
+            
+        if isinstance(treatments, int) or isinstance(treatments, str):
+            treatments = [int(treatments)]
+        
+        # On Mac, DSSAT typically uses lowercase filenames
+        batch_file_name = "dssbatch.v48" if len(experiment_files) > 1 else "batchfile.v48"
+        
+        # Find crop directory - might be in Genotype or similar on Mac
+        crop_directory = None
+        
+        # Check in direct path
+        direct_path = os.path.join(self.dssat_path, crop_folder)
+        if os.path.exists(direct_path):
+            crop_directory = direct_path
+        
+        # Check in parent directory (since we might be in /bin)
+        if crop_directory is None:
+            parent_path = os.path.dirname(self.dssat_path)
+            parent_crop_path = os.path.join(parent_path, crop_folder)
+            if os.path.exists(parent_crop_path):
+                crop_directory = parent_crop_path
+        
+        # Check in standard locations for Mac DSSAT
+        if crop_directory is None:
+            # Try common DSSAT folder structure on Mac
+            for crop_location in ['Genotype', 'genotype', 'Cultivars', 'cultivars', 'Data', 'data']:
+                possible_path = os.path.join(os.path.dirname(self.dssat_path), crop_location, crop_folder)
+                if os.path.exists(possible_path):
+                    crop_directory = possible_path
+                    break
+        
+        if crop_directory is None:
+            raise FileNotFoundError(f"Crop directory not found for {crop_folder}")
+        
+        logger.info(f"Using crop directory: {crop_directory}")
+        
+        # Extract crop code from directory name or first experiment
+        crop_code = crop_folder[:2].upper()
+        batch_file_path = os.path.join(crop_directory, batch_file_name)
+        
+        # Build batch file content
+        lines = []
+        lines.append(f"$BATCH({crop_code})")
+        lines.append("!")
+        lines.append(f"! Directory    : {crop_directory}")
+        lines.append(f"! Command Line : {os.path.join(self.dssat_path, self.executable)} B {batch_file_name}")
+        lines.append(f"! Crop         : {crop_folder}")
+        
+        if experiment_files:
+            lines.append(f"! Experiment   : {experiment_files[0]}")
+        
+        # Calculate total number of runs (experiments × treatments)
+        total_runs = 0
+        valid_runs = []  # Store valid experiment/treatment combinations
+        
+        # Validate treatments for each experiment
+        for exp_file in experiment_files:
+            # Get full path to experiment file
+            exp_path = os.path.join(crop_directory, exp_file)
+            
+            # On Mac, check for lowercase version too
+            if not os.path.exists(exp_path):
+                lowercase_path = os.path.join(crop_directory, exp_file.lower())
+                if os.path.exists(lowercase_path):
+                    exp_path = lowercase_path
+            
+            # Verify file exists
+            if not os.path.exists(exp_path):
+                logger.warning(f"Experiment file not found: {exp_path} - Skipping")
+                continue
+            
+            # Check which treatments are valid for this experiment
+            valid_treatments = []
+            try:
+                with open(exp_path, 'r') as f:
+                    exp_content = f.read()
+                
+                # Find the *TREATMENTS section
+                treatment_section = None
+                if "*TREATMENTS" in exp_content:
+                    sections = exp_content.split("*")
+                    for section in sections:
+                        if section.startswith("TREATMENTS"):
+                            treatment_section = section
+                            break
+                
+                # Parse treatments section to find valid treatments
+                if treatment_section:
+                    lines_in_section = treatment_section.strip().split("\n")
+                    for line in lines_in_section:
+                        # Skip header lines, empty lines, and commented lines
+                        if line.startswith("@") or not line.strip() or line.strip().startswith("!"):
+                            continue
+                        
+                        # Parse treatment number
+                        parts = line.strip().split()
+                        if parts and parts[0].isdigit():
+                            valid_treatments.append(int(parts[0]))
+            except Exception as e:
+                logger.warning(f"Error checking treatments in {exp_path}: {str(e)}")
+                # If we can't determine valid treatments, assume all requested treatments are valid
+                valid_treatments = treatments
+            
+            # If no valid treatments found, use the requested treatments
+            if not valid_treatments:
+                valid_treatments = treatments
+                
+            logger.info(f"Valid treatments for {exp_file}: {valid_treatments}")
+            
+            # Add valid experiment/treatment combinations
+            for trt in treatments:
+                if trt in valid_treatments:
+                    valid_runs.append((exp_path, trt))
+                    
+        # Update total runs
+        total_runs = len(valid_runs)
+        
+        if total_runs == 0:
+            logger.warning("No valid experiment/treatment combinations found!")
+            # Use the first requested treatment as fallback
+            if experiment_files and treatments:
+                exp_path = os.path.join(crop_directory, experiment_files[0])
+                if os.path.exists(exp_path):
+                    valid_runs = [(exp_path, treatments[0])]
+                    total_runs = 1
+                    logger.info(f"Using fallback: {experiment_files[0]} with treatment {treatments[0]}")
+        
+        lines.append(f"! ExpNo        : {total_runs}")
+        
+        # Header line
+        lines.append("!")
+        lines.append("@FILEX" + " " * 84 + "TRTNO     RP     SQ     OP     CO")
+        
+        # Add valid experiment/treatment combinations
+        for exp_path, trt in valid_runs:
+            padded_path = exp_path.ljust(90)
+            line = f"{padded_path}{int(trt):>5}      1      0      0      0"
+            lines.append(line)
+        
+        # Write batch file - ensure Unix line endings for Mac
+        with open(batch_file_path, "w", newline="\n") as f:
+            f.write("\n".join(lines))
+        
+        logger.info(f"Created batch file: {batch_file_path} with {total_runs} total runs")
+        return batch_file_path
+    
+
+    def run_batch(self, batch_file_path: str) -> Dict:
+        """
+        Run DSSAT with a batch file on Mac.
+        
+        Args:
+            batch_file_path: Path to the batch file
+            
+        Returns:
+            Dictionary with run results
+        """
+        crop_directory = os.path.dirname(batch_file_path)
+        batch_file_name = os.path.basename(batch_file_path)
+        
+        # Verify batch file exists
+        if not os.path.exists(batch_file_path):
+            raise FileNotFoundError(f"Batch file not found: {batch_file_path}")
+        
+        # Change to crop directory
+        original_dir = os.getcwd()
+        os.chdir(crop_directory)
+        
+        try:
+            # Build command - for Mac, we don't need quotes
+            exe_path = os.path.join(self.dssat_path, self.executable)
+            cmd = f"{exe_path} B {batch_file_name}"
+            
+            # Check if this is a Tomato model
+            is_tomato = "TOMATO" in crop_directory.upper()
+            if is_tomato:
+                # For Tomato, use CRGRO048 model directly
+                cmd = f"{exe_path} CRGRO048 B {batch_file_name}"
+            
+            logger.info(f"Running command: {cmd} in {crop_directory}")
+            
+            # Execute DSSAT
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True
+            )
+            
+            # If failed and it's Tomato, try alternative models
+            if result.returncode != 0 and is_tomato:
+                for model in ["CROPGRO", "CRGRO047", "TMGRO048"]:
+                    alt_cmd = f"{exe_path} {model} B {batch_file_name}"
+                    logger.info(f"Trying alternative model: {alt_cmd}")
+                    
+                    alt_result = subprocess.run(
+                        alt_cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    if alt_result.returncode == 0:
+                        logger.info(f"Success with model {model}")
+                        result = alt_result
+                        break
+            
+            # Process results
+            output_files = []
+            if result.returncode == 0:
+                # Look for output files (case insensitive on Mac)
+                output_files = [f for f in os.listdir(crop_directory) 
+                            if (f.upper().endswith(".OUT") or f.lower().endswith(".out")) 
+                            and os.path.isfile(os.path.join(crop_directory, f))]
+                
+                logger.info(f"DSSAT completed successfully with {len(output_files)} output files")
+            else:
+                logger.error(f"DSSAT failed with return code {result.returncode}")
+                logger.error(f"Output: {result.stdout}")
+                logger.error(f"Error: {result.stderr}")
+                
+                # Check for WARNING.OUT file for more info
+                warning_file = os.path.join(crop_directory, "WARNING.OUT")
+                if os.path.exists(warning_file):
+                    try:
+                        with open(warning_file, 'r') as f:
+                            warnings = f.read()
+                        logger.error(f"WARNING.OUT contents: {warnings}")
+                    except:
+                        pass
+            
+            return {
+                "success": result.returncode == 0,
+                "return_code": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "output_files": output_files
+            }
+            
+        finally:
+            os.chdir(original_dir)
+    
+    def run_experiments(self, 
+                       crop_folder: str, 
+                       experiment_files: Union[str, List[str]], 
+                       treatments: Union[int, List[int]]) -> Dict:
+        """
+        Create batch file and run experiments.
+        
+        Args:
+            crop_folder: Name of the crop folder
+            experiment_files: Single experiment file or list
+            treatments: Treatment number(s) to run
+            
+        Returns:
+            Dictionary with run results
+        """
+        batch_file = self.create_batch_file(crop_folder, experiment_files, treatments)
+        return self.run_batch(batch_file)
+    
+    def list_available_experiments(self, crop_folder: str) -> List[str]:
+        """
+        List all available experiment files for a crop.
+        
+        Args:
+            crop_folder: Name of the crop folder
+            
+        Returns:
+            List of experiment files
+        """
+        # Find crop directory like we do in create_batch_file
+        crop_directory = None
+        
+        # Check in direct path
+        direct_path = os.path.join(self.dssat_path, crop_folder)
+        if os.path.exists(direct_path):
+            crop_directory = direct_path
+        
+        # Check in parent directory (since we might be in /bin)
+        if crop_directory is None:
+            parent_path = os.path.dirname(self.dssat_path)
+            parent_crop_path = os.path.join(parent_path, crop_folder)
+            if os.path.exists(parent_crop_path):
+                crop_directory = parent_crop_path
+        
+        # Check in standard locations for Mac DSSAT
+        if crop_directory is None:
+            # Try common DSSAT folder structure on Mac
+            for crop_location in ['Genotype', 'genotype', 'Cultivars', 'cultivars', 'Data', 'data']:
+                possible_path = os.path.join(os.path.dirname(self.dssat_path), crop_location, crop_folder)
+                if os.path.exists(possible_path):
+                    crop_directory = possible_path
+                    break
+        
+        if crop_directory is None:
+            raise FileNotFoundError(f"Crop directory not found for {crop_folder}")
+        
+        # Look for experiment files (*.??X) - case insensitive for Mac
+        experiments = []
+        for file in os.listdir(crop_directory):
+            file_upper = file.upper()
+            if file_upper.endswith("X") and len(file_upper.split(".")) == 2:
+                experiments.append(file)
+        
+        return sorted(experiments)
+    
+    def list_available_crops(self) -> List[str]:
+        """
+        List all available crop folders.
+        
+        Returns:
+            List of crop folders
+        """
+        # On Mac, crops might be in Genotype or other folders
+        crops = []
+        
+        # First check in the main directory
+        for item in os.listdir(self.dssat_path):
+            item_path = os.path.join(self.dssat_path, item)
+            if os.path.isdir(item_path):
+                # Check if directory contains experiment files
+                if any(f.upper().endswith("X") for f in os.listdir(item_path)):
+                    crops.append(item)
+        
+        # If no crops found, check in common locations
+        if not crops:
+            # Try parent directory
+            parent_dir = os.path.dirname(self.dssat_path)
+            
+            for crop_location in ['Genotype', 'genotype', 'Cultivars', 'cultivars', 'Data', 'data']:
+                location_path = os.path.join(parent_dir, crop_location)
+                if os.path.exists(location_path) and os.path.isdir(location_path):
+                    for item in os.listdir(location_path):
+                        item_path = os.path.join(location_path, item)
+                        if os.path.isdir(item_path):
+                            # Check if directory contains experiment files
+                            try:
+                                if any(f.upper().endswith("X") for f in os.listdir(item_path)):
+                                    crops.append(item)
+                            except:
+                                pass  # Skip directories we can't access
+        
+        return sorted(crops)
+    def list_treatments(self, crop_folder: str, experiment_file: str) -> List[dict]:
+        """
+        List all treatments defined in an experiment file.
+        
+        Args:
+            crop_folder: Name of the crop folder
+            experiment_file: Experiment file name
+            
+        Returns:
+            List of dictionaries with treatment info
+        """
+        # Find crop directory
+        crop_directory = None
+        direct_path = os.path.join(self.dssat_path, crop_folder)
+        if os.path.exists(direct_path):
+            crop_directory = direct_path
+        
+        # Check in parent directory (since we might be in /bin)
+        if crop_directory is None:
+            parent_path = os.path.dirname(self.dssat_path)
+            parent_crop_path = os.path.join(parent_path, crop_folder)
+            if os.path.exists(parent_crop_path):
+                crop_directory = parent_crop_path
+        
+        # Check in standard locations for Mac DSSAT
+        if crop_directory is None:
+            for crop_location in ['Genotype', 'genotype', 'Cultivars', 'cultivars', 'Data', 'data']:
+                possible_path = os.path.join(os.path.dirname(self.dssat_path), crop_location, crop_folder)
+                if os.path.exists(possible_path):
+                    crop_directory = possible_path
+                    break
+        
+        if crop_directory is None:
+            raise FileNotFoundError(f"Crop directory not found for {crop_folder}")
+        
+        # Get full path to experiment file
+        exp_path = os.path.join(crop_directory, experiment_file)
+        
+        # On Mac, check for lowercase version too
+        if not os.path.exists(exp_path):
+            lowercase_path = os.path.join(crop_directory, experiment_file.lower())
+            if os.path.exists(lowercase_path):
+                exp_path = lowercase_path
+        
+        if not os.path.exists(exp_path):
+            raise FileNotFoundError(f"Experiment file not found: {exp_path}")
+        
+        # Parse the experiment file to extract treatments
+        treatments = []
+        
+        try:
+            with open(exp_path, 'r') as f:
+                exp_content = f.read()
+            
+            # Find the *TREATMENTS section
+            if "*TREATMENTS" in exp_content:
+                sections = exp_content.split("*")
+                for section in sections:
+                    if section.startswith("TREATMENTS"):
+                        lines = section.strip().split("\n")
+                        header_line = None
+                        
+                        for i, line in enumerate(lines):
+                            if line.startswith("@N"):
+                                header_line = line
+                                # Process subsequent treatment lines
+                                for j in range(i+1, len(lines)):
+                                    # Stop if we hit the next section
+                                    if lines[j].startswith("*") or lines[j].startswith("@"):
+                                        break
+                                    
+                                    treatment_line = lines[j].strip()
+                                    # Skip empty lines
+                                    if not treatment_line:
+                                        continue
+                                    
+                                    # Parse treatment line
+                                    is_active = not treatment_line.startswith("!")
+                                    if not is_active:
+                                        treatment_line = treatment_line[1:].strip()
+                                    
+                                    # Split by whitespace (handle variable spacing)
+                                    parts = treatment_line.split()
+                                    
+                                    if parts and parts[0].isdigit():
+                                        treatment_num = int(parts[0])
+                                        # Extract treatment name if available
+                                        treatment_name = ""
+                                        if len(parts) > 4:  # N R O C TNAME
+                                            name_start = treatment_line.find(parts[4])
+                                            if name_start > 0:
+                                                # Find where the name ends (before next column)
+                                                name_end = treatment_line.find("  ", name_start)
+                                                if name_end > 0:
+                                                    treatment_name = treatment_line[name_start:name_end].strip()
+                                                else:
+                                                    treatment_name = parts[4]
+                                        
+                                        treatments.append({
+                                            "number": treatment_num,
+                                            "active": is_active,
+                                            "name": treatment_name,
+                                            "line": treatment_line
+                                        })
+                                
+                                break  # Found the header line, processed treatments
+        
+        except Exception as e:
+            logger.error(f"Error parsing treatments in {exp_path}: {str(e)}")
+        
+        return treatments
+# Simple interactive test script
+if __name__ == "__main__":
+    print(f"Running on: {platform.system()} {platform.release()}")
+    
+    # Get DSSAT path from user or environment
+    dssat_path = os.environ.get("DSSAT_HOME")
+    if not dssat_path:
+        dssat_path = input("Enter DSSAT installation path: ")
+    
+    # Create runner
+    try:
+        runner = DSSATRunner(dssat_path)
+        
+        # List available crops
+        print("\nLooking for available crops...")
+        crops = runner.list_available_crops()
+        
+        if not crops:
+            print("No crops found. Please check your DSSAT installation.")
+            exit(1)
+            
+        print("\nAvailable crops:")
+        for i, crop in enumerate(crops, 1):
+            print(f"{i}. {crop}")
+        
+        # Select crop
+        crop_choice = int(input("\nSelect crop (number): ")) - 1
+        if crop_choice < 0 or crop_choice >= len(crops):
+            print("Invalid choice")
+            exit(1)
+        
+        selected_crop = crops[crop_choice]
+        print(f"Selected crop: {selected_crop}")
+        
+        # List available experiments
+        print("\nLooking for available experiments...")
+        try:
+            experiments = runner.list_available_experiments(selected_crop)
+            
+            if not experiments:
+                print(f"No experiment files found for {selected_crop}.")
+                exit(1)
+                
+            print("\nAvailable experiments:")
+            for i, exp in enumerate(experiments, 1):
+                print(f"{i}. {exp}")
+            
+            # Select experiments
+            print("\nSelect experiments (comma-separated numbers, e.g., 1,3,5): ")
+            exp_choices = input("> ").strip().split(",")
+            selected_experiments = []
+            
+            for choice in exp_choices:
+                try:
+                    idx = int(choice.strip()) - 1
+                    if 0 <= idx < len(experiments):
+                        selected_experiments.append(experiments[idx])
+                except ValueError:
+                    continue
+            
+            if not selected_experiments:
+                print("No valid experiments selected")
+                exit(1)
+            
+            print(f"Selected experiments: {selected_experiments}")
+            
+            # Select treatment(s)
+            treatments = input("\nEnter treatment number(s) (comma-separated): ").strip().split(",")
+            treatments = [int(t.strip()) for t in treatments if t.strip().isdigit()]
+            
+            if not treatments:
+                treatments = [1]  # Default to treatment 1
+            
+            print(f"Selected treatments: {treatments}")
+            
+            # Run experiments
+            print("\nRunning DSSAT...")
+            result = runner.run_experiments(selected_crop, selected_experiments, treatments)
+            
+            # Show results
+            if result["success"]:
+                print("\nDSSAT completed successfully!")
+                print(f"Output files: {', '.join(result['output_files'])}")
+            else:
+                print("\nDSSAT execution failed!")
+                print(f"Return code: {result['return_code']}")
+                print("\nError output:")
+                print(result["stderr"] or result["stdout"])
+            
+        except Exception as e:
+            print(f"Error with experiments: {str(e)}")
+            
+    except Exception as e:
+
+        print(f"Error: {str(e)}")
